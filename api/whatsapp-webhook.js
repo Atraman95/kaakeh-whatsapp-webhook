@@ -22,10 +22,8 @@ export default async function handler(req, res) {
   if (req.method === 'POST') {
     try {
       const body = req.body;
-
       const message = body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-      // Ignore non-text messages and webhook noise
       if (!message || message.type !== 'text') {
         return res.status(200).send('No text message');
       }
@@ -33,18 +31,25 @@ export default async function handler(req, res) {
       const text = message.text.body || '';
       const waMessageId = message.id;
 
-      // Extract customer name from first line: "Order Summary - NAME"
       const firstLine = text.split('\n')[0] || '';
       const customerName = firstLine.replace('Order Summary -', '').trim() || null;
 
-      // Insert into Supabase with safe defaults
+      // Simple validation checks
+      const hasDeliveryDate = text.includes('Delivery Date -');
+      const hasDeliveryTime = text.includes('Delivery Time -');
+      const hasContact = text.includes('Contact -');
+
+      const requiresReview =
+        hasDeliveryDate && hasDeliveryTime && hasContact ? 'no' : 'yes';
+
       const { error } = await supabase.from('orders').insert([
         {
           customer_name: customerName,
           raw_message_text: text,
           wa_message_id: waMessageId,
           order_status: 'new',
-          payment_status: 'unpaid'
+          payment_status: 'unpaid',
+          requires_review: requiresReview
         }
       ]);
 
