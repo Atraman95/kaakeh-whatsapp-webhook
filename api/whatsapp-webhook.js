@@ -5,14 +5,12 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// ---------- parsing helpers ----------
+// ---------- helpers ----------
 function normalizeLine(line = '') {
   return line.replace(/\r/g, '').trim();
 }
 
 function extractAfterDash(text, label) {
-  // Matches: "Label - value" (case-insensitive), returns value
-  // Example: extractAfterDash(msg, "Delivery Date") -> "2026-02-28"
   const re = new RegExp(`^\\s*${label}\\s*-\\s*(.+)\\s*$`, 'i');
   const lines = text.split('\n').map(normalizeLine);
   for (const line of lines) {
@@ -24,35 +22,59 @@ function extractAfterDash(text, label) {
 
 function extractCustomerName(text) {
   const firstLine = normalizeLine(text.split('\n')[0] || '');
-  // Expected: "Order Summary - Name"
   const m = firstLine.match(/^order\s*summary\s*-\s*(.+)$/i);
   return m?.[1]?.trim() || null;
 }
 
+function extractItems(text) {
+  const lines = text.split('\n').map(normalizeLine);
+
+  const items = [];
+  let insideItems = false;
+
+  for (const line of lines) {
+    if (/^items:/i.test(line)) {
+      insideItems = true;
+      continue;
+    }
+
+    if (insideItems) {
+      if (!line || /^[A-Za-z\s]+-/.test(line) === false && !/^\d+/.test(line)) {
+        // stop if we hit another section like Total -
+        if (/^-?\s*Total/i.test(line) || /^Delivery/i.test(line)) {
+          break;
+        }
+      }
+
+      // Match: 6 Pizza - 25
+      const match = line.match(/^(\d+)\s+(.+?)\s*-\s*(\d+)/);
+
+      if (match) {
+        items.push({
+          name: match[2].trim(),
+          qty: parseInt(match[1]),
+          price: parseFloat(match[3])
+        });
+      }
+    }
+  }
+
+  return items;
+}
+
 function parseMessage(text) {
   const customer_name = extractCustomerName(text);
+  const delivery_date = extractAfterDash(text, 'Delivery Date');
+  const delivery_time = extractAfterDash(text, 'Delivery Time');
+  const address = extractAfterDash(text, 'Location');
+  const phone = extractAfterDash(text, 'Contact');
 
-  // Preferred (new) template labels:
-  const delivery_date =
-    extractAfterDash(text, 'Delivery Date') ||
-    null;
+  const items_json = extractItems(text);
 
-  const delivery_time =
-    extractAfterDash(text, 'Delivery Time') ||
-    null;
-
-  const address =
-    extractAfterDash(text, 'Location') ||
-    null;
-
-  const phone =
-    extractAfterDash(text, 'Contact') ||
-    null;
-
-  // Minimal “needs review” logic:
-  // Require customer + delivery date/time + phone (address can be TBD sometimes)
   const requires_review =
-    customer_name && delivery_date && delivery_time && phone ? 'no' : 'yes';
+    customer_name && delivery_date && delivery_time && phone
+      ? 'no'
+      : 'yes';
 
   return {
     customer_name,
@@ -60,12 +82,12 @@ function parseMessage(text) {
     delivery_time,
     address,
     phone,
+    items_json,
     requires_review
   };
 }
 
 export default async function handler(req, res) {
-  // ===== WEBHOOK VERIFICATION =====
   if (req.method === 'GET') {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
@@ -77,13 +99,11 @@ export default async function handler(req, res) {
     return res.status(403).send('Verification failed');
   }
 
-  // ===== RECEIVE MESSAGE =====
   if (req.method === 'POST') {
     try {
       const body = req.body;
       const message = body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-      // Ignore webhook noise / non-text
       if (!message || message.type !== 'text') {
         return res.status(200).send('No text message');
       }
@@ -104,7 +124,8 @@ export default async function handler(req, res) {
           payment_status: 'unpaid',
           requires_review: parsed.requires_review,
           raw_message_text,
-          wa_message_id
+          wa_message_id,
+          items_json: parsed.items_json
         }
       ]);
 
