@@ -10,7 +10,14 @@ function normalizeLine(line = '') {
   return line.replace(/\r/g, '').trim();
 }
 
+function extractCustomerName(text) {
+  const firstLine = normalizeLine(text.split('\n')[0] || '');
+  const m = firstLine.match(/^order\s*summary\s*-\s*(.+)$/i);
+  return m?.[1]?.trim() || null;
+}
+
 function extractAfterDash(text, label) {
+  // Matches: "Label - value" (case-insensitive)
   const re = new RegExp(`^\\s*${label}\\s*-\\s*(.+)\\s*$`, 'i');
   const lines = text.split('\n').map(normalizeLine);
   for (const line of lines) {
@@ -20,10 +27,16 @@ function extractAfterDash(text, label) {
   return null;
 }
 
-function extractCustomerName(text) {
-  const firstLine = normalizeLine(text.split('\n')[0] || '');
-  const m = firstLine.match(/^order\s*summary\s*-\s*(.+)$/i);
-  return m?.[1]?.trim() || null;
+function extractTotalNumber(text) {
+  // Accepts "Total - 291" or "Total =291"
+  const lines = text.split('\n').map(normalizeLine);
+  for (const line of lines) {
+    let m = line.match(/^total\s*-\s*(\d+(\.\d+)?)\s*$/i);
+    if (m) return Number(m[1]);
+    m = line.match(/^total\s*=\s*(\d+(\.\d+)?)\s*$/i);
+    if (m) return Number(m[1]);
+  }
+  return null;
 }
 
 function extractItems(text) {
@@ -38,32 +51,44 @@ function extractItems(text) {
       continue;
     }
 
-    if (insideItems) {
-      if (!line || /^[A-Za-z\s]+-/.test(line) === false && !/^\d+/.test(line)) {
-        // stop if we hit another section like Total -
-        if (/^-?\s*Total/i.test(line) || /^Delivery/i.test(line)) {
-          break;
-        }
-      }
+    if (!insideItems) continue;
 
-      // Match: 6 Pizza - 25
-      const match = line.match(/^(\d+)\s+(.+?)\s*-\s*(\d+)/);
+    // Stop when we hit another section label
+    if (
+      /^total\b/i.test(line) ||
+      /^delivery\b/i.test(line) ||
+      /^location\b/i.test(line) ||
+      /^contact\b/i.test(line) ||
+      /^payment\b/i.test(line)
+    ) {
+      break;
+    }
 
-      if (match) {
-        items.push({
-          name: match[2].trim(),
-          qty: parseInt(match[1]),
-          price: parseFloat(match[3])
-        });
-      }
+    // Match: "6 Pizza - 25"  (25 is LINE TOTAL)
+    const match = line.match(/^(\d+)\s+(.+?)\s*-\s*(\d+(\.\d+)?)\s*$/);
+    if (match) {
+      items.push({
+        name: match[2].trim(),
+        qty: parseInt(match[1], 10),
+        line_total: Number(match[3])
+      });
     }
   }
 
   return items;
 }
 
+function round2(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+function sumLineTotals(items) {
+  return round2(items.reduce((acc, it) => acc + (Number(it.line_total) || 0), 0));
+}
+
 function parseMessage(text) {
   const customer_name = extractCustomerName(text);
+
   const delivery_date = extractAfterDash(text, 'Delivery Date');
   const delivery_time = extractAfterDash(text, 'Delivery Time');
   const address = extractAfterDash(text, 'Location');
@@ -71,10 +96,18 @@ function parseMessage(text) {
 
   const items_json = extractItems(text);
 
-  const requires_review =
-    customer_name && delivery_date && delivery_time && phone
-      ? 'no'
-      : 'yes';
+  const stated_total = extractTotalNumber(text);
+  const computed_total = sumLineTotals(items_json);
+
+  // Base review logic: missing core fields
+  let requires_review =
+    customer_name && delivery_date && delivery_time && phone ? 'no' : 'yes';
+
+  // Mismatch logic: if stated_total exists and differs from computed_total
+  if (stated_total !== null) {
+    const diff = Math.abs(round2(stated_total) - round2(computed_total));
+    if (diff > 0.01) requires_review = 'yes';
+  }
 
   return {
     customer_name,
@@ -83,11 +116,14 @@ function parseMessage(text) {
     address,
     phone,
     items_json,
+    stated_total: stated_total !== null ? round2(stated_total) : null,
+    computed_total: round2(computed_total),
     requires_review
   };
 }
 
 export default async function handler(req, res) {
+  // ===== WEBHOOK VERIFICATION =====
   if (req.method === 'GET') {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
@@ -99,6 +135,7 @@ export default async function handler(req, res) {
     return res.status(403).send('Verification failed');
   }
 
+  // ===== RECEIVE MESSAGE =====
   if (req.method === 'POST') {
     try {
       const body = req.body;
@@ -125,7 +162,9 @@ export default async function handler(req, res) {
           requires_review: parsed.requires_review,
           raw_message_text,
           wa_message_id,
-          items_json: parsed.items_json
+          items_json: parsed.items_json,
+          stated_total: parsed.stated_total,
+          computed_total: parsed.computed_total
         }
       ]);
 
