@@ -43,7 +43,7 @@ export default async function handler(req, res) {
           customer_name: customerName,
           raw_message_text: text,
           wa_message_id: waMessageId,
-          order_status: 'pending',
+          order_status: 'new',
           payment_status: 'unpaid'
         }
       ]);
