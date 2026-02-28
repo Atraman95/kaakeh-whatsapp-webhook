@@ -17,7 +17,6 @@ function extractCustomerName(text) {
 }
 
 function extractAfterDash(text, label) {
-  // Matches: "Label - value" (case-insensitive)
   const re = new RegExp(`^\\s*${label}\\s*-\\s*(.+)\\s*$`, 'i');
   const lines = text.split('\n').map(normalizeLine);
   for (const line of lines) {
@@ -28,7 +27,6 @@ function extractAfterDash(text, label) {
 }
 
 function extractTotalNumber(text) {
-  // Accepts "Total - 291" or "Total =291"
   const lines = text.split('\n').map(normalizeLine);
   for (const line of lines) {
     let m = line.match(/^total\s*-\s*(\d+(\.\d+)?)\s*$/i);
@@ -50,10 +48,8 @@ function extractItems(text) {
       insideItems = true;
       continue;
     }
-
     if (!insideItems) continue;
 
-    // Stop when we hit another section label
     if (
       /^total\b/i.test(line) ||
       /^delivery\b/i.test(line) ||
@@ -64,7 +60,6 @@ function extractItems(text) {
       break;
     }
 
-    // Match: "6 Pizza - 25"  (25 is LINE TOTAL)
     const match = line.match(/^(\d+)\s+(.+?)\s*-\s*(\d+(\.\d+)?)\s*$/);
     if (match) {
       items.push({
@@ -74,7 +69,6 @@ function extractItems(text) {
       });
     }
   }
-
   return items;
 }
 
@@ -99,11 +93,9 @@ function parseMessage(text) {
   const stated_total = extractTotalNumber(text);
   const computed_total = sumLineTotals(items_json);
 
-  // Base review logic: missing core fields
   let requires_review =
     customer_name && delivery_date && delivery_time && phone ? 'no' : 'yes';
 
-  // Mismatch logic: if stated_total exists and differs from computed_total
   if (stated_total !== null) {
     const diff = Math.abs(round2(stated_total) - round2(computed_total));
     if (diff > 0.01) requires_review = 'yes';
@@ -139,6 +131,10 @@ export default async function handler(req, res) {
   if (req.method === 'POST') {
     try {
       const body = req.body;
+
+      // TEMP: log full payload so we can identify group id fields
+      console.log('FULL WEBHOOK BODY:', JSON.stringify(body, null, 2));
+
       const message = body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
       if (!message || message.type !== 'text') {
@@ -147,6 +143,11 @@ export default async function handler(req, res) {
 
       const wa_message_id = message.id;
       const raw_message_text = message.text?.body || '';
+
+      // TEMP SAFETY: ignore anything not starting with Order Summary -
+      if (!raw_message_text.startsWith('Order Summary -')) {
+        return res.status(200).send('Ignored');
+      }
 
       const parsed = parseMessage(raw_message_text);
 
